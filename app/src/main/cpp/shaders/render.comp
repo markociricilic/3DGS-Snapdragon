@@ -1,0 +1,128 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "./common.glsl"
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+// Using full-precision floats for better quality
+// #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+
+layout (std430, set = 0, binding = 0) readonly buffer Vertices {
+    VertexAttribute attr[];
+};
+
+layout (std430, set = 0, binding = 1) readonly buffer Boundaries {
+    uint boundaries[];
+};
+
+layout (std430, set = 0, binding = 2) readonly buffer SortedVertices {
+    uint sorted_vertices[];
+};
+
+layout (set = 1, binding = 0) uniform writeonly image2D output_image;
+
+layout( push_constant ) uniform Constants
+{
+    uint width;
+    uint height;
+    uint useHalfResolution;
+};
+
+layout (local_size_x = TILE_WIDTH, local_size_y = TILE_HEIGHT, local_size_z = 1) in;
+
+// Function to render a pixel and return its color
+vec3 renderPixel(uvec2 pixel_coords) {
+    uint tiles_width = ((width + TILE_WIDTH - 1) / TILE_WIDTH);
+    uint tileX = pixel_coords.x / TILE_WIDTH;
+    uint tileY = pixel_coords.y / TILE_WIDTH;
+    
+    uint start = boundaries[(tileX + tileY * tiles_width) * 2];
+    uint end = boundaries[(tileX + tileY * tiles_width) * 2 + 1];
+
+    float T = 1.0f;
+    vec3 c = vec3(0.0f);
+
+    for (uint i = start; i < end; i++) {
+        uint vertex_key = sorted_vertices[i];
+        vec2 uv = attr[vertex_key].uv;
+        vec2 distance = uv - vec2(pixel_coords);
+        vec4 co = attr[vertex_key].conic_opacity;
+        float power = -0.5f * (co.x * distance.x * distance.x + co.z * distance.y * distance.y) - co.y * distance.x * distance.y;
+
+        if (power > 0.0f) {
+            continue;
+        }
+
+        // Improved precision for alpha calculation
+        float alpha = min(0.99f, co.w * exp(power));
+        
+        // More precise alpha threshold for better quality
+        if (alpha < 0.5f / 255.0f) {
+            continue;
+        }
+
+        float test_T = T * (1.0f - alpha);
+        // More precise early termination threshold
+        if (test_T < 0.00005f) {
+            c += attr[vertex_key].color_radii.xyz * alpha * T;
+            break;
+        }
+
+        c += attr[vertex_key].color_radii.xyz * alpha * T;
+        T = test_T;
+        
+        // Early termination when 99.95% opaque (improved threshold)
+        if (T < 0.0005f) {
+            break;
+        }
+    }
+    
+    return c;
+}
+
+void main() {
+    uint tileX = gl_WorkGroupID.x;
+    uint tileY = gl_WorkGroupID.y;
+    uint localX = gl_LocalInvocationID.x;
+    uint localY = gl_LocalInvocationID.y;
+
+    // Calculate current UV coordinates
+    uvec2 curr_uv = uvec2(tileX * TILE_WIDTH + localX, tileY * TILE_HEIGHT + localY);
+    
+    // Exit if out of bounds
+    if (curr_uv.x >= width || curr_uv.y >= height) {
+        return;
+    }
+
+    if (useHalfResolution == 1) {
+        // In half-resolution mode, each thread handles a 2x2 block of pixels in the output
+        // We multiply by 2 because our dispatch is half size
+        uvec2 fullResUV = curr_uv * 2;
+        
+        // CRITICAL: We need to scale the coordinates correctly to match the full-res view
+        // This prevents the "zoomed in" appearance by correctly mapping to the original space
+        vec3 color = renderPixel(fullResUV);
+        
+        // Write to the 2x2 block (carefully handling edges)
+        // Top-left pixel
+        imageStore(output_image, ivec2(fullResUV), vec4(color, 1.0f));
+        
+        // Top-right pixel (if in bounds)
+        if (fullResUV.x + 1 < width) {
+            imageStore(output_image, ivec2(fullResUV.x + 1, fullResUV.y), vec4(color, 1.0f));
+        }
+        
+        // Bottom-left pixel (if in bounds)
+        if (fullResUV.y + 1 < height) {
+            imageStore(output_image, ivec2(fullResUV.x, fullResUV.y + 1), vec4(color, 1.0f));
+        }
+        
+        // Bottom-right pixel (if in bounds)
+        if (fullResUV.x + 1 < width && fullResUV.y + 1 < height) {
+            imageStore(output_image, ivec2(fullResUV.x + 1, fullResUV.y + 1), vec4(color, 1.0f));
+        }
+    } else {
+        // Full resolution rendering
+        vec3 color = renderPixel(curr_uv);
+        imageStore(output_image, ivec2(curr_uv), vec4(color, 1.0f));
+    }
+}

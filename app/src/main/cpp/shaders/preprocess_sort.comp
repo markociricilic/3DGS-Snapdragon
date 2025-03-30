@@ -1,0 +1,68 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "./common.glsl"
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types: enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
+// maybe VK_KHR_shader_float16_int8 extension?
+
+layout (std430, set = 0, binding = 0) readonly buffer Vertices {
+    VertexAttribute attr[];
+};
+
+layout (std430, set = 0, binding = 1) readonly buffer In {
+    uint prefixSum[];
+};
+
+layout (std430, set = 0, binding = 2) writeonly buffer OutKeys {
+    uint keys[];
+};
+
+layout (std430, set = 0, binding = 3) writeonly buffer OutPayloads {
+    uint payloads[];
+};
+
+layout( push_constant ) uniform Constants
+{
+    uint tileX;
+};
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= prefixSum.length()) {
+        return;
+    }
+
+    if (attr[index].color_radii.w == 0) {
+        return;
+    }
+
+    assert(attr[index].aabb.x < attr[index].aabb.z && attr[index].aabb.y < attr[index].aabb.w, "in!!!valid aabb: %d %d %d %d\n", ivec4(attr[index].aabb));
+
+    uint ind = index == 0 ? 0 : prefixSum[index - 1];
+
+    for (uint i = attr[index].aabb.x; i < attr[index].aabb.z; i++) {
+        for (uint j = attr[index].aabb.y; j < attr[index].aabb.w; j++) {
+            uint tileIndex = i + j * tileX;
+            uint16_t tileIndexTrunc = uint16_t(tileIndex);
+            
+            // Get the original depth value
+            float depthValue = attr[index].depth;
+            
+            uint depthBits = floatBitsToUint(depthValue);
+            
+            uint16_t depthKeys = uint16_t(depthBits >> 16); 
+            
+            uint k = (uint(tileIndexTrunc) << 16) | uint(depthKeys);
+
+            keys[ind] = k;
+            payloads[ind] = index;
+            ind++;
+        }
+    }
+
+    assert(ind == prefixSum[index], "ind: %d", ind);
+}

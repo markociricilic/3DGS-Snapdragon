@@ -1,0 +1,1 @@
+gcc -o embedfile embedfile.c
